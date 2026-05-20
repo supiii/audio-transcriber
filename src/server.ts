@@ -15,6 +15,7 @@ const UPLOAD_DIR = path.resolve('./uploads');
 const CACHE_DIR = path.join(UPLOAD_DIR, EXTRACTED_AUDIO_DIRNAME);
 const ACCEPTED_EXTS = [...SUPPORTED_AUDIO_FORMATS, ...SUPPORTED_VIDEO_FORMATS];
 const ACCEPTED_LANGUAGES = ['en', 'et', 'fi'] as const;
+const MAX_SPEAKERS = 10;
 
 ensureDirectoryExists(UPLOAD_DIR);
 
@@ -69,6 +70,13 @@ const INDEX_HTML = `<!doctype html>
       <option value="et">Estonian</option>
       <option value="fi">Finnish</option>
     </select>
+    <label for="speakers">Number of speakers</label>
+    <select name="speakers" id="speakers">
+      ${Array.from({ length: MAX_SPEAKERS }, (_, i) => {
+        const n = i + 1;
+        return `<option value="${n}"${n === 1 ? ' selected' : ''}>${n}</option>`;
+      }).join('')}
+    </select>
     <button type="submit" id="submit">Transcribe</button>
     <div id="status"></div>
     <div id="progress" class="progress"><div id="bar" class="progress-bar"></div></div>
@@ -80,6 +88,7 @@ const INDEX_HTML = `<!doctype html>
   const form = document.getElementById('form');
   const fileInput = document.getElementById('file');
   const languageSelect = document.getElementById('language');
+  const speakersSelect = document.getElementById('speakers');
   const submit = document.getElementById('submit');
   const status = document.getElementById('status');
   const progress = document.getElementById('progress');
@@ -224,6 +233,7 @@ const INDEX_HTML = `<!doctype html>
       const data = new FormData();
       data.append('file', fileInput.files[0]);
       data.append('language', languageSelect.value);
+      data.append('speakers', speakersSelect.value);
       const res = await fetch('/transcribe', { method: 'POST', body: data });
       if (!res.ok) {
         const msg = await res.text();
@@ -306,6 +316,16 @@ app.post(
       return;
     }
 
+    const speakersExpected = parseSpeakers(req.body?.speakers);
+    if (speakersExpected === INVALID) {
+      cleanup(uploadedPath);
+      res
+        .status(400)
+        .type('text/plain')
+        .send(`Unsupported speaker count. Accepted: 1-${MAX_SPEAKERS}`);
+      return;
+    }
+
     res.status(200);
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -322,7 +342,7 @@ app.post(
         uploadedPath,
         originalName,
         CACHE_DIR,
-        { language, speakerLabels: true, speakersExpected: 1 },
+        { language, speakerLabels: true, speakersExpected },
         (event: ProgressEvent) => send(event)
       );
 
@@ -356,4 +376,10 @@ function parseLanguage(value: unknown): string | undefined | typeof INVALID {
     return undefined;
   }
   return (ACCEPTED_LANGUAGES as readonly string[]).includes(value) ? value : INVALID;
+}
+
+function parseSpeakers(value: unknown): number | typeof INVALID {
+  if (value === undefined || value === '') return 1;
+  const n = typeof value === 'string' ? Number(value) : NaN;
+  return Number.isInteger(n) && n >= 1 && n <= MAX_SPEAKERS ? n : INVALID;
 }
