@@ -4,9 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
-- `npm run dev -- [audioDir] [outputDir] [language]` — run via ts-node without building.
+- `npm run dev -- [audioDir] [outputDir] [language]` — run the CLI via ts-node without building.
 - `npm run build` — compile TypeScript to `dist/`.
-- `npm start -- [audioDir] [outputDir] [language]` — run the compiled output.
+- `npm start -- [audioDir] [outputDir] [language]` — run the compiled CLI.
+- `npm run server` — start the web UI on `http://localhost:3000` (override with `PORT=...`).
+- `npm run start:server` — run the compiled web UI from `dist/`.
 
 CLI positional args (all optional, defaults shown):
 1. `audioDir` — `./audio`
@@ -33,6 +35,10 @@ Call chain:
 - [src/types/index.ts](src/types/index.ts) — shared `TranscriptionOptions` / `TranscriptionResult` types.
 
 Defaults set in `index.ts` enable diarization with `speakersExpected: 1`. Toggling diarization off requires passing `speakerLabels: false` (the service treats `!== false` as truthy).
+
+## Web UI
+
+[src/server.ts](src/server.ts) is a thin Express layer over the same services. `GET /` serves an inline HTML upload form; `POST /transcribe` accepts one multipart file, hands it to [src/services/processUpload.ts](src/services/processUpload.ts), and streams the formatted `.txt` back as an attachment. Uploads land in `./uploads/` (gitignored) and are deleted after the response; video uploads also produce a cached MP3 under `./uploads/.extracted/` (reuses `EXTRACTED_AUDIO_DIRNAME` from the CLI path). Same defaults as the CLI: auto language detection, `speakerLabels: true`, `speakersExpected: 1`. The HTTP request hangs until AssemblyAI returns — no job queue, so very long files may hit proxy/browser timeouts.
 
 ## Legacy code
 
