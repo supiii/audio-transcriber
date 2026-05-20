@@ -2,11 +2,13 @@ import * as path from 'path';
 import { TranscriptionOptions } from '../types';
 import {
   ensureDirectoryExists,
-  getAudioFiles,
+  getMediaFiles,
+  isVideoFile,
   saveTranscription,
 } from '../utils/fileSystem';
 import { formatTranscription } from '../utils/formatting';
 import { transcribeAudioFile } from './transcription';
+import { EXTRACTED_AUDIO_DIRNAME, extractAudio } from './audioExtraction';
 
 export async function transcribeDirectory(
   dirPath: string,
@@ -15,17 +17,22 @@ export async function transcribeDirectory(
 ): Promise<void> {
   ensureDirectoryExists(outputDir);
 
-  const audioFiles = getAudioFiles(dirPath);
+  const mediaFiles = getMediaFiles(dirPath);
+  const cacheDir = path.join(dirPath, EXTRACTED_AUDIO_DIRNAME);
 
-  console.log(`Found ${audioFiles.length} audio files to transcribe`);
+  console.log(`Found ${mediaFiles.length} media files to transcribe`);
 
-  for (const file of audioFiles) {
+  for (const file of mediaFiles) {
     const filePath = path.join(dirPath, file);
     const outputFileName = `${path.parse(file).name}.txt`;
     const outputPath = path.join(outputDir, outputFileName);
 
     try {
-      const result = await transcribeAudioFile(filePath, options);
+      const audioPath = isVideoFile(file)
+        ? await extractAudio(filePath, cacheDir)
+        : filePath;
+
+      const result = await transcribeAudioFile(audioPath, options);
       const formattedOutput = formatTranscription(result);
 
       saveTranscription(outputPath, formattedOutput);

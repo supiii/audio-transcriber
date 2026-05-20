@@ -3,15 +3,21 @@ import * as path from 'path';
 
 export const SUPPORTED_AUDIO_FORMATS = [
   '.mp3',
-  '.mp4',
   '.mpeg',
   '.mpga',
   '.m4a',
   '.wav',
-  '.webm',
   '.flac',
   '.ogg',
   '.opus',
+];
+
+export const SUPPORTED_VIDEO_FORMATS = [
+  '.mp4',
+  '.mov',
+  '.mkv',
+  '.avi',
+  '.webm',
 ];
 
 export function ensureDirectoryExists(dirPath: string): void {
@@ -20,10 +26,15 @@ export function ensureDirectoryExists(dirPath: string): void {
   }
 }
 
-export function getAudioFiles(dirPath: string): string[] {
+export function isVideoFile(file: string): boolean {
+  return SUPPORTED_VIDEO_FORMATS.includes(path.extname(file).toLowerCase());
+}
+
+export function getMediaFiles(dirPath: string): string[] {
   const files = fs.readdirSync(dirPath);
+  const accepted = [...SUPPORTED_AUDIO_FORMATS, ...SUPPORTED_VIDEO_FORMATS];
   return files.filter((file) =>
-    SUPPORTED_AUDIO_FORMATS.includes(path.extname(file).toLowerCase())
+    accepted.includes(path.extname(file).toLowerCase())
   );
 }
 

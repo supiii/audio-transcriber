@@ -10,10 +10,16 @@ export async function transcribeAudioFile(
 
     const transcript = await client.transcripts.transcribe({
       audio: filePath,
-      language_code: options.language || 'et',
+      ...(options.language
+        ? { language_code: options.language as never }
+        : { language_detection: true }),
       speaker_labels: options.speakerLabels !== false, // Default true
       speakers_expected: options.speakersExpected || 2,
     });
+
+    if (!options.language && transcript.language_code) {
+      console.log(`  Detected language: ${transcript.language_code}`);
+    }
 
     if (transcript.status === 'error') {
       throw new Error(`Transcription failed: ${transcript.error}`);
