@@ -2,7 +2,7 @@ import express, { Request, Response } from 'express';
 import multer from 'multer';
 import * as fs from 'fs';
 import * as path from 'path';
-import { processUpload } from './services/processUpload';
+import { processUpload, ProgressEvent } from './services/processUpload';
 import { EXTRACTED_AUDIO_DIRNAME } from './services/audioExtraction';
 import {
   SUPPORTED_AUDIO_FORMATS,
@@ -48,6 +48,12 @@ const INDEX_HTML = `<!doctype html>
   #status { margin-top: 1rem; font-size: 0.95rem; color: #555; min-height: 1.5em; }
   #status.error { color: #c00; }
   .note { margin-top: 1rem; font-size: 0.85rem; color: #888; }
+  .progress { margin-top: 1rem; height: 8px; background: #eee; border-radius: 999px; overflow: hidden; display: none; }
+  .progress.visible { display: block; }
+  .progress-bar { height: 100%; width: 0%; background: #111; transition: width 0.4s ease; }
+  .progress.indeterminate .progress-bar { width: 40%; animation: slide 1.4s ease-in-out infinite; }
+  @keyframes slide { 0% { margin-left: -40%; } 100% { margin-left: 100%; } }
+  #eta { margin-top: 0.4rem; font-size: 0.8rem; color: #888; min-height: 1em; }
 </style>
 </head>
 <body>
@@ -65,7 +71,9 @@ const INDEX_HTML = `<!doctype html>
     </select>
     <button type="submit" id="submit">Transcribe</button>
     <div id="status"></div>
-    <p class="note">Transcription may take a few minutes for long files. Don't close this tab.</p>
+    <div id="progress" class="progress"><div id="bar" class="progress-bar"></div></div>
+    <div id="eta"></div>
+    <p class="note">Progress is estimated — AssemblyAI doesn't report a true percentage. Don't close this tab.</p>
   </form>
 
 <script>
@@ -74,6 +82,130 @@ const INDEX_HTML = `<!doctype html>
   const languageSelect = document.getElementById('language');
   const submit = document.getElementById('submit');
   const status = document.getElementById('status');
+  const progress = document.getElementById('progress');
+  const bar = document.getElementById('bar');
+  const eta = document.getElementById('eta');
+
+  // AssemblyAI's "best" tier processes audio at roughly 1–2% of real-time
+  // (≈1 minute for a 100-minute file). Cap visible progress at 95% until
+  // 'done' arrives, and floor the estimate so short files don't show 2s.
+  const SPEED_FACTOR = 0.015;
+  const MIN_ESTIMATE_MS = 15000;
+  const MAX_BEFORE_DONE = 95;
+
+  let tickHandle = null;
+  let estimatedTotalMs = null;
+  let phaseStartedAt = null;
+  let phaseStartPct = 0;
+  let currentPct = 0;
+
+  function setBar(pct) {
+    currentPct = Math.max(0, Math.min(100, pct));
+    bar.style.width = currentPct + '%';
+  }
+
+  function showProgress(indeterminate) {
+    progress.classList.add('visible');
+    progress.classList.toggle('indeterminate', !!indeterminate);
+    if (indeterminate) bar.style.width = '';
+  }
+
+  function hideProgress() {
+    progress.classList.remove('visible');
+    progress.classList.remove('indeterminate');
+  }
+
+  function stopTick() {
+    if (tickHandle != null) { clearInterval(tickHandle); tickHandle = null; }
+  }
+
+  function startProcessingTick() {
+    stopTick();
+    if (estimatedTotalMs == null) { showProgress(true); return; }
+    progress.classList.remove('indeterminate');
+    phaseStartedAt = Date.now();
+    phaseStartPct = currentPct;
+    tickHandle = setInterval(() => {
+      const elapsed = Date.now() - phaseStartedAt;
+      const fraction = Math.min(1, elapsed / estimatedTotalMs);
+      const target = phaseStartPct + (MAX_BEFORE_DONE - phaseStartPct) * fraction;
+      setBar(target);
+      const remainingMs = Math.max(0, estimatedTotalMs - elapsed);
+      eta.textContent = 'Estimated time remaining: ' + formatDuration(remainingMs);
+    }, 500);
+  }
+
+  function formatDuration(ms) {
+    const s = Math.ceil(ms / 1000);
+    if (s < 60) return s + 's';
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return m + 'm ' + r.toString().padStart(2, '0') + 's';
+  }
+
+  function reset() {
+    stopTick();
+    estimatedTotalMs = null;
+    phaseStartedAt = null;
+    phaseStartPct = 0;
+    currentPct = 0;
+    hideProgress();
+    eta.textContent = '';
+  }
+
+  function handleEvent(event) {
+    switch (event.type) {
+      case 'probed':
+        estimatedTotalMs = Math.max(MIN_ESTIMATE_MS, Math.round(event.durationMs * SPEED_FACTOR));
+        eta.textContent = 'Estimated time: ' + formatDuration(estimatedTotalMs);
+        break;
+      case 'extracting':
+        status.textContent = 'Extracting audio from video…';
+        showProgress(true);
+        break;
+      case 'extracted':
+        status.textContent = 'Audio extracted.';
+        setBar(5);
+        progress.classList.remove('indeterminate');
+        break;
+      case 'uploading':
+        status.textContent = 'Uploading to AssemblyAI…';
+        showProgress(estimatedTotalMs == null);
+        if (estimatedTotalMs != null) setBar(Math.max(currentPct, 8));
+        break;
+      case 'submitted':
+        status.textContent = 'Submitted. Waiting in queue…';
+        if (estimatedTotalMs != null) setBar(Math.max(currentPct, 12));
+        break;
+      case 'queued':
+        status.textContent = 'Queued at AssemblyAI…';
+        startProcessingTick();
+        break;
+      case 'processing':
+        status.textContent = 'Transcribing…';
+        startProcessingTick();
+        break;
+    }
+  }
+
+  async function readSSE(response, onEvent) {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buffer.indexOf('\\n\\n')) !== -1) {
+        const raw = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        const dataLine = raw.split('\\n').find((l) => l.startsWith('data: '));
+        if (!dataLine) continue;
+        try { onEvent(JSON.parse(dataLine.slice(6))); } catch (e) {}
+      }
+    }
+  }
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -81,7 +213,12 @@ const INDEX_HTML = `<!doctype html>
 
     submit.disabled = true;
     status.className = '';
-    status.textContent = 'Uploading and transcribing…';
+    status.textContent = 'Uploading file…';
+    reset();
+    showProgress(true);
+
+    let finalEvent = null;
+    let errorEvent = null;
 
     try {
       const data = new FormData();
@@ -92,24 +229,37 @@ const INDEX_HTML = `<!doctype html>
         const msg = await res.text();
         throw new Error(msg || ('Server error: ' + res.status));
       }
-      const blob = await res.blob();
-      const disposition = res.headers.get('content-disposition') || '';
-      const match = disposition.match(/filename="([^"]+)"/);
-      const filename = match ? match[1] : 'transcription.txt';
 
+      await readSSE(res, (event) => {
+        if (event.type === 'done') finalEvent = event;
+        else if (event.type === 'error') errorEvent = event;
+        else handleEvent(event);
+      });
+
+      if (errorEvent) throw new Error(errorEvent.message);
+      if (!finalEvent) throw new Error('Stream ended without a result.');
+
+      stopTick();
+      setBar(100);
+      eta.textContent = '';
+
+      const blob = new Blob([finalEvent.content], { type: 'text/plain;charset=utf-8' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = filename;
+      a.download = finalEvent.filename;
       document.body.appendChild(a);
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
 
-      status.textContent = 'Done. Downloaded ' + filename;
+      status.textContent = 'Done. Downloaded ' + finalEvent.filename;
     } catch (err) {
       status.className = 'error';
       status.textContent = err.message || String(err);
+      hideProgress();
+      stopTick();
+      eta.textContent = '';
     } finally {
       submit.disabled = false;
     }
@@ -156,27 +306,33 @@ app.post(
       return;
     }
 
+    res.status(200);
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders?.();
+
+    const send = (event: object): void => {
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+    };
+
     try {
       const { filename, content } = await processUpload(
         uploadedPath,
         originalName,
         CACHE_DIR,
-        { language, speakerLabels: true, speakersExpected: 1 }
+        { language, speakerLabels: true, speakersExpected: 1 },
+        (event: ProgressEvent) => send(event)
       );
 
-      res
-        .status(200)
-        .type('text/plain; charset=utf-8')
-        .setHeader(
-          'Content-Disposition',
-          `attachment; filename="${sanitizeFilename(filename)}"`
-        );
-      res.send(content);
+      send({ type: 'done', filename: sanitizeFilename(filename), content });
     } catch (err) {
       console.error('Transcription failed:', err);
-      res.status(500).type('text/plain').send('Transcription failed. Check server logs.');
+      send({ type: 'error', message: 'Transcription failed. Check server logs.' });
     } finally {
       cleanup(uploadedPath);
+      res.end();
     }
   }
 );
